@@ -1,16 +1,24 @@
 package com.googlecode.objectify.impl.translate;
 
-import com.google.appengine.api.datastore.PropertyContainer;
+import com.google.cloud.datastore.EntityValue;
+import com.google.cloud.datastore.FullEntity;
+import com.google.cloud.datastore.IncompleteKey;
+import com.google.cloud.datastore.ListValue;
+import com.google.cloud.datastore.StringValue;
+import com.google.cloud.datastore.Value;
 import com.googlecode.objectify.annotation.Subclass;
+import com.googlecode.objectify.impl.Forge;
+import com.googlecode.objectify.impl.KeyMetadata;
 import com.googlecode.objectify.impl.Path;
+import com.googlecode.objectify.util.LogUtils;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 /**
  * <p>Some common code for Translators which know how to convert a POJO type into a PropertiesContainer.
@@ -18,10 +26,9 @@ import java.util.logging.Logger;
  *
  * @author Jeff Schnitzer <jeff@infohazard.org>
  */
-public class ClassTranslator<P> extends NullSafeTranslator<P, PropertyContainer>
+@Slf4j
+public class ClassTranslator<P> extends NullSafeTranslator<P, FullEntity<?>>
 {
-	private static final Logger log = Logger.getLogger(ClassTranslator.class.getName());
-
 	/** Name of the out-of-band discriminator property in a PropertyContainer */
 	public static final String DISCRIMINATOR_PROPERTY = "^d";
 
@@ -29,24 +36,28 @@ public class ClassTranslator<P> extends NullSafeTranslator<P, PropertyContainer>
 	public static final String DISCRIMINATOR_INDEX_PROPERTY = "^i";
 
 	/** The declared class we are responsible for. */
+	@Getter
 	private final Class<P> declaredClass;
 
 	/** Lets us construct the initial objects */
-	private final Creator<P> creator;
+	@Getter
+	private final Forge forge;
 
 	/** Does the heavy lifting of copying properties */
-	private final Populator<P> populator;
+	@Getter
+	private final ClassPopulator<P> populator;
 
 	/**
-	 * The discriminator for this subclass, or null for the base class.
+	 * The discriminator for this subclass, or null if this is not a @Subclass
 	 */
+	@Getter
 	private final String discriminator;
 
 	/**
 	 * The discriminators that will be indexed for this subclass.  Empty for the base class or any
 	 * subclasses for which all discriminators are unindexed.
 	 */
-	private final List<String> indexedDiscriminators = new ArrayList<>();
+	private final List<StringValue> indexedDiscriminators = new ArrayList<>();
 
 	/** Keyed by discriminator value, including alsoload discriminators */
 	private Map<String, ClassTranslator<? extends P>> byDiscriminator = new HashMap<>();
@@ -55,15 +66,14 @@ public class ClassTranslator<P> extends NullSafeTranslator<P, PropertyContainer>
 	private Map<Class<? extends P>, ClassTranslator<? extends P>> byClass = new HashMap<>();
 
 	/** */
-	public ClassTranslator(Class<P> declaredClass, Path path, Creator<P> creator, Populator<P> populator) {
-		if (log.isLoggable(Level.FINEST))
-			log.finest("Creating class translator for " + declaredClass.getName() + " at path '"+ path + "'");
+	public ClassTranslator(final Class<P> declaredClass, final CreateContext ctx, final Path path) {
+		log.trace("Creating class translator for {} at path '{}'", declaredClass.getName(), path);
 
 		this.declaredClass = declaredClass;
-		this.creator = creator;
-		this.populator = populator;
+		this.forge = ctx.getFactory();
+		this.populator = new ClassPopulator<>(declaredClass, ctx, path);
 
-		Subclass sub = declaredClass.getAnnotation(Subclass.class);
+		final Subclass sub = declaredClass.getAnnotation(Subclass.class);
 		if (sub != null) {
 			discriminator = (sub.name().length() > 0) ? sub.name() : declaredClass.getSimpleName();
 			addIndexedDiscriminators(declaredClass);
@@ -72,54 +82,31 @@ public class ClassTranslator<P> extends NullSafeTranslator<P, PropertyContainer>
 		}
 	}
 
-	/**
-	 * @return the class we translate
-	 */
-	public Class<P> getDeclaredClass() {
-		return declaredClass;
-	}
-
-	/**
-	 * @return the discriminator for this class, or null if this is not a @Subclass
-	 */
-	public String getDiscriminator() {
-		return discriminator;
-	}
-
-	/**
-	 * Get the populator associated with this class.
-	 */
-	public Populator<P> getPopulator() {
-		return populator;
-	}
-
-	/**
-	 * Get the creator associated with this class.
-	 */
-	public Creator<P> getCreator() { return creator; }
-
 	/* */
 	@Override
-	public P loadSafe(PropertyContainer container, LoadContext ctx, Path path) throws SkipException {
+	public P loadSafe(final Value<FullEntity<?>> container, final LoadContext ctx, final Path path) throws SkipException {
 		// check if we need to redirect to a different translator
-		String containerDiscriminator = (String)container.getProperty(DISCRIMINATOR_PROPERTY);
+		final String containerDiscriminator = container.get().contains(DISCRIMINATOR_PROPERTY) ? container.get().getString(DISCRIMINATOR_PROPERTY) : null;	// wow no Optional or nullable get
 		if (!Objects.equals(discriminator, containerDiscriminator)) {
-			ClassTranslator<? extends P> translator = byDiscriminator.get(containerDiscriminator);
+			final ClassTranslator<? extends P> translator = byDiscriminator.get(containerDiscriminator);
 			if (translator == null) {
 				throw new IllegalStateException("Datastore object has discriminator value '" + containerDiscriminator + "' but no relevant @Subclass is registered");
 			} else {
-				// This line fixes alsoLoad names in discriminators by changing the discriminator to what the
+				// This fixes alsoLoad names in discriminators by changing the discriminator to what the
 				// translator expects for loading that subclass. Otherwise we'll get the error above since the
 				// translator discriminator and the container discriminator won't match.
-				container.setUnindexedProperty(DISCRIMINATOR_PROPERTY, translator.getDiscriminator());
-
-				return translator.load(container, ctx, path);
+				final StringValue discriminatorValue = StringValue.newBuilder(translator.getDiscriminator()).setExcludeFromIndexes(true).build();
+				final FullEntity<?> updatedEntity = FullEntity.newBuilder(container.get()).set(DISCRIMINATOR_PROPERTY, discriminatorValue).build();
+				return translator.load(EntityValue.of(updatedEntity), ctx, path);
 			}
 		} else {
 			// This is a normal load
-			P into = creator.load(container, ctx, path);
+			if (log.isTraceEnabled())
+				log.trace(LogUtils.msg(path, "Instantiating a " + declaredClass.getName()));
 
-			populator.load(container, ctx, path, into);
+			final P into = forge.construct(declaredClass);
+
+			populator.load(container.get(), ctx, path, into);
 
 			return into;
 		}
@@ -127,46 +114,50 @@ public class ClassTranslator<P> extends NullSafeTranslator<P, PropertyContainer>
 
 	/* */
 	@Override
-	public PropertyContainer saveSafe(P pojo, boolean index, SaveContext ctx, Path path) throws SkipException {
+	public Value<FullEntity<?>> saveSafe(final P pojo, final boolean index, final SaveContext ctx, final Path path) throws SkipException {
 		// check if we need to redirect to a different translator
 		if (pojo.getClass() != declaredClass) {
 			// Sometimes generics are more of a hindrance than a help
 			@SuppressWarnings("unchecked")
-			ClassTranslator<P> translator = (ClassTranslator<P>)byClass.get(pojo.getClass());
+			final ClassTranslator<P> translator = (ClassTranslator<P>)byClass.get(pojo.getClass());
 			if (translator == null)
 				throw new IllegalStateException("Class '" + pojo.getClass() + "' is not a registered @Subclass");
 			else
 				return translator.save(pojo, index, ctx, path);
 		} else {
 			// This is a normal save
-			PropertyContainer into = creator.save(pojo, index, ctx, path);
+			final FullEntity.Builder<IncompleteKey> into = FullEntity.newBuilder();
 
 			populator.save(pojo, index, ctx, path, into);
 
 			if (discriminator != null) {
-				into.setUnindexedProperty(DISCRIMINATOR_PROPERTY, discriminator);
+				into.set(DISCRIMINATOR_PROPERTY, StringValue.newBuilder(discriminator).setExcludeFromIndexes(true).build());
 
 				if (!indexedDiscriminators.isEmpty())
-					into.setProperty(DISCRIMINATOR_INDEX_PROPERTY, indexedDiscriminators);
+					into.set(DISCRIMINATOR_INDEX_PROPERTY, ListValue.of(indexedDiscriminators));
 			}
 
-			return into;
+			// The question of whether to index this is weird. In order for subthings to be indexed, the entity needs
+			// to be indexed. But then lists with index-heterogeous values (say, nulls) get reordered (!)
+			// by the datastore. So we always index EntityValues and force all the list translators homogenize their lists.
+			// Gross but seems to be the only way.
+			return EntityValue.of(into.build());
 		}
 	}
 
 	/**
 	 * Recursively go through the class hierarchy adding any discriminators that are indexed
 	 */
-	private void addIndexedDiscriminators(Class<?> clazz) {
+	private void addIndexedDiscriminators(final Class<?> clazz) {
 		if (clazz == Object.class)
 			return;
 
 		this.addIndexedDiscriminators(clazz.getSuperclass());
 
-		Subclass sub = clazz.getAnnotation(Subclass.class);
+		final Subclass sub = clazz.getAnnotation(Subclass.class);
 		if (sub != null && sub.index()) {
-			String disc = (sub.name().length() > 0) ? sub.name() : clazz.getSimpleName();
-			this.indexedDiscriminators.add(disc);
+			final String disc = (sub.name().length() > 0) ? sub.name() : clazz.getSimpleName();
+			this.indexedDiscriminators.add(StringValue.of(disc));
 		}
 	}
 
@@ -184,4 +175,8 @@ public class ClassTranslator<P> extends NullSafeTranslator<P, PropertyContainer>
 		byClass.put(translator.getDeclaredClass(), translator);
 	}
 
+	/** Only works on @Entity classes */
+	public KeyMetadata<P> getKeyMetadata() {
+		return populator.getKeyMetadata();
+	}
 }

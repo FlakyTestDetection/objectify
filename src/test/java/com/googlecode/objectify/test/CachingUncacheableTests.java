@@ -3,35 +3,32 @@
 
 package com.googlecode.objectify.test;
 
-import com.google.appengine.api.memcache.AsyncMemcacheService;
-import com.google.appengine.api.memcache.IMemcacheServiceFactory;
-import com.google.appengine.api.memcache.MemcacheService;
-import com.google.appengine.api.memcache.MemcacheServiceFactory;
 import com.googlecode.objectify.Key;
 import com.googlecode.objectify.ObjectifyFactory;
+import com.googlecode.objectify.ObjectifyService;
 import com.googlecode.objectify.annotation.Cache;
 import com.googlecode.objectify.annotation.Entity;
 import com.googlecode.objectify.annotation.Id;
 import com.googlecode.objectify.test.util.TestBase;
-import lombok.Data;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
+import com.googlecode.objectify.util.Closeable;
+import net.spy.memcached.MemcachedClient;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mock;
 
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
-
-import static com.googlecode.objectify.test.util.TestObjectifyService.fact;
-import static com.googlecode.objectify.test.util.TestObjectifyService.ofy;
+import static com.google.common.truth.Truth.assertThat;
+import static com.googlecode.objectify.ObjectifyService.factory;
+import static com.googlecode.objectify.ObjectifyService.ofy;
+import static org.mockito.Mockito.verifyZeroInteractions;
 
 /**
  * @author Jeff Schnitzer <jeff@infohazard.org>
  */
-public class CachingUncacheableTests extends TestBase
-{
+class CachingUncacheableTests extends TestBase {
 	/** */
 	@Entity
-	static class Uncacheable {
+	private static class Uncacheable {
 		@Id Long id;
 		String stuff;
 	}
@@ -39,65 +36,45 @@ public class CachingUncacheableTests extends TestBase
 	/** */
 	@Entity
 	@Cache
-	static class Cacheable {
+	private static class Cacheable {
 		@Id Long id;
 		String stuff;
 	}
 
-	@Data
-	static class CallCounter implements InvocationHandler {
-		private final Object base;
-		private int count;
+	/** */
+	private Closeable rootService;
 
-		@Override
-		public Object invoke(final Object proxy, final Method method, final Object[] args) throws Throwable {
-			if (!method.getName().equals("setErrorHandler"))
-				count++;
-
-			return method.invoke(base, args);
-		}
-	}
-
-	private CallCounter counter;
+	/** */
+	@Mock
+	private MemcachedClient memcachedClient;
 
 	/**
 	 */
-	@BeforeMethod
-	public void setUpExtra() {
-		counter = new CallCounter(MemcacheServiceFactory.getAsyncMemcacheService(ObjectifyFactory.MEMCACHE_NAMESPACE));
+	@BeforeEach
+	void setUpExtra() {
+		ObjectifyService.setFactory(new ObjectifyFactory(datastore(), memcachedClient));
+		factory().register(Uncacheable.class);
+		factory().register(Cacheable.class);	// needed to get caching in the code path
 
-		final MemcacheService proxy = (MemcacheService)Proxy.newProxyInstance(
-				this.getClass().getClassLoader(),
-				new Class<?>[]{MemcacheService.class},
-				counter);
+		rootService = ObjectifyService.begin();
+	}
 
-		fact().setMemcacheFactory(new IMemcacheServiceFactory() {
-			@Override
-			public MemcacheService getMemcacheService(final String s) {
-				return proxy;
-			}
-
-			@Override
-			public AsyncMemcacheService getAsyncMemcacheService(final String s) {
-				throw new UnsupportedOperationException();
-			}
-		});
-
-		fact().register(Uncacheable.class);
-		fact().register(Cacheable.class);	// needed to get caching in the code path
+	@AfterEach
+	void tearDownExtra() {
+		rootService.close();
 	}
 
 	/** */
 	@Test
-	public void ensureUncacheableThingsDoNotTouchMemcache() throws Exception {
-		Uncacheable un1 = new Uncacheable();
+	void ensureUncacheableThingsDoNotTouchMemcache() throws Exception {
+		final Uncacheable un1 = new Uncacheable();
 		un1.stuff = "un1 stuff";
 
 		final Key<Uncacheable> key = ofy().save().entity(un1).now();
 		ofy().clear();
 		final Uncacheable fetched = ofy().load().key(key).now();
 
-		assert fetched != null;
-		assert counter.getCount() == 0;
+		assertThat(fetched).isNotNull();
+		verifyZeroInteractions(memcachedClient);
 	}
 }

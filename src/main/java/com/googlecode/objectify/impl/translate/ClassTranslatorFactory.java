@@ -1,9 +1,7 @@
 package com.googlecode.objectify.impl.translate;
 
-import com.google.appengine.api.datastore.PropertyContainer;
-import com.googlecode.objectify.annotation.Entity;
+import com.google.cloud.datastore.FullEntity;
 import com.googlecode.objectify.annotation.Subclass;
-import com.googlecode.objectify.impl.KeyMetadata;
 import com.googlecode.objectify.impl.Path;
 
 import java.util.HashMap;
@@ -33,21 +31,18 @@ import java.util.Map;
  *
  * @author Jeff Schnitzer <jeff@infohazard.org>
  */
-public class ClassTranslatorFactory<P> implements TranslatorFactory<P, PropertyContainer>
+public class ClassTranslatorFactory<P> implements TranslatorFactory<P, FullEntity<?>>
 {
 	/** Cache of existing translators, see the class javadoc */
-	private Map<Class<P>, ClassTranslator<P>> translators = new HashMap<>();
+	private final Map<Class<P>, ClassTranslator<P>> translators = new HashMap<>();
 
 	@Override
-	public ClassTranslator<P> create(TypeKey<P> tk, CreateContext ctx, Path path) {
-		Class<P> clazz = tk.getTypeAsClass();
+	public ClassTranslator<P> create(final TypeKey<P> tk, final CreateContext ctx, final Path path) {
+		final Class<P> clazz = tk.getTypeAsClass();
 
 		ClassTranslator<P> classTranslator = translators.get(clazz);
 		if (classTranslator == null) {
-			// Entity is an inherited annotation; this checks up the hierarchy
-			classTranslator = (clazz.isAnnotationPresent(Entity.class))
-					? createEntityClassTranslator(clazz, ctx, path)
-					: createEmbeddedClassTranslator(clazz, ctx, path);
+			classTranslator = new ClassTranslator<>(clazz, ctx, path);
 
 			translators.put(clazz, classTranslator);
 
@@ -59,34 +54,15 @@ public class ClassTranslatorFactory<P> implements TranslatorFactory<P, PropertyC
 	}
 
 	/**
-	 */
-	public static <P> ClassTranslator<P> createEntityClassTranslator(Class<P> clazz, CreateContext ctx, Path path) {
-		KeyMetadata<P> keyMetadata = new KeyMetadata<>(clazz, ctx, path);
-		Creator<P> creator = new EntityCreator<>(clazz, ctx.getFactory(), keyMetadata);
-		Populator<P> populator = new ClassPopulator<>(clazz, ctx, path);
-
-		return new ClassTranslator<>(clazz, path, creator, populator);
-	}
-
-	/**
-	 */
-	public static <P> ClassTranslator<P> createEmbeddedClassTranslator(Class<P> clazz, CreateContext ctx, Path path) {
-		Creator<P> creator = new EmbeddedCreator<>(clazz, ctx.getFactory());
-		Populator<P> populator = new ClassPopulator<>(clazz, ctx, path);
-
-		return new ClassTranslator<>(clazz, path, creator, populator);
-	}
-
-	/**
 	 * Recursively register this subclass with all the superclass translators. This works because we cache
 	 * translators uniquely in the factory.
 	 */
-	private void registerSubclass(ClassTranslator<P> translator, TypeKey<? super P> superclassTypeKey, CreateContext ctx, Path path) {
+	private void registerSubclass(final ClassTranslator<P> translator, final TypeKey<? super P> superclassTypeKey, final CreateContext ctx, final Path path) {
 		if (superclassTypeKey.getTypeAsClass() == Object.class)
 			return;
 
 		@SuppressWarnings("unchecked")
-		ClassTranslator<? super P> superTranslator = create((TypeKey)superclassTypeKey, ctx, path);
+		final ClassTranslator<? super P> superTranslator = create((TypeKey)superclassTypeKey, ctx, path);
 		superTranslator.registerSubclass(translator);
 
 		registerSubclass(translator, new TypeKey<>(superclassTypeKey.getTypeAsClass().getSuperclass()), ctx, path);

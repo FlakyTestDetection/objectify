@@ -1,8 +1,8 @@
 package com.googlecode.objectify.impl;
 
-import com.google.appengine.api.datastore.QueryResultIterable;
-import com.google.appengine.api.datastore.QueryResultIterator;
+import com.google.cloud.datastore.QueryResults;
 import com.googlecode.objectify.LoadResult;
+import com.googlecode.objectify.cmd.QueryResultIterable;
 
 import java.util.List;
 
@@ -17,42 +17,37 @@ abstract class Queryable<T> extends SimpleQueryImpl<T>
 {
 	/**
 	 */
-	Queryable(LoaderImpl<?> loader) {
+	Queryable(final LoaderImpl loader) {
 		super(loader);
 	}
 
 	@Override
-	public LoadResult<T> first()
-	{
-		QueryImpl<T> q = createQuery();
+	public LoadResult<T> first() {
+		final QueryImpl<T> q = createQuery();
 		return q.first();
 	}
 
 	@Override
-	public QueryResultIterator<T> iterator()
-	{
-		QueryImpl<T> q = createQuery();
+	public QueryResults<T> iterator() {
+		final QueryImpl<T> q = createQuery();
 		return q.iterator();
 	}
 
 	@Override
-	public QueryResultIterable<T> iterable()
-	{
-		QueryImpl<T> q = createQuery();
+	public QueryResultIterable<T> iterable() {
+		final QueryImpl<T> q = createQuery();
 		return q.iterable();
 	}
 
 	@Override
-	public int count()
-	{
-		QueryImpl<T> q = createQuery();
+	public int count() {
+		final QueryImpl<T> q = createQuery();
 		return q.count();
 	}
 
 	@Override
-	public List<T> list()
-	{
-		QueryImpl<T> q = createQuery();
+	public List<T> list() {
+		final QueryImpl<T> q = createQuery();
 		return q.list();
 	}
 

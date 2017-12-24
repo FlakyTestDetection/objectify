@@ -1,11 +1,10 @@
 package com.googlecode.objectify;
 
-import com.google.appengine.api.datastore.ReadPolicy.Consistency;
-import com.google.appengine.api.datastore.Transaction;
 import com.googlecode.objectify.cmd.Deferred;
 import com.googlecode.objectify.cmd.Deleter;
 import com.googlecode.objectify.cmd.Loader;
 import com.googlecode.objectify.cmd.Saver;
+import com.googlecode.objectify.impl.AsyncTransaction;
 
 /**
  * <p>This is the main "business end" of Objectify.  It lets you load, save, and delete your typed POJO entities.</p>
@@ -92,25 +91,6 @@ public interface Objectify
 	ObjectifyFactory factory();
 
 	/**
-	 * <p>Provides a new Objectify instance with the specified Consistency.  Generally speaking, STRONG consistency
-	 * provides more consistent results more slowly; EVENTUAL consistency produces results quickly but they
-	 * might be out of date.  See the
-	 * <a href="http://code.google.com/appengine/docs/java/javadoc/com/google/appengine/api/datastore/ReadPolicy.Consistency.html">Appengine Docs</a>
-	 * for more explanation.</p>
-	 *
-	 * <p>The new instance will inherit all other characteristics (transaction, cache policy, session cache contents, etc)
-	 * from this instance.</p>
-	 *
-	 * <p><b>All command objects are immutable; this method returns a new object rather than modifying the
-	 * current command object.</b></p>
-	 *
-	 * @param policy the consistency policy to use.  STRONG load()s are more consistent but EVENTUAL load()s
-	 *  are faster.
-	 * @return a new immutable Objectify instance with the consistency policy replaced
-	 */
-	Objectify consistency(Consistency policy);
-
-	/**
 	 * <p>Provides a new Objectify instance with a limit, in seconds, for datastore calls.  If datastore calls take longer
 	 * than this amount, a timeout exception will be thrown.</p>
 	 *
@@ -122,7 +102,12 @@ public interface Objectify
 	 *
 	 * @param value - limit in seconds, or null to indicate no deadline (other than the standard whole request deadline of 30s/10m).
 	 * @return a new immutable Objectify instance with the specified deadline
+	 *
+	 * @deprecated This no longer does anything. Transport-level behavior is set via DatastoreOptions when you create
+	 * the ObjectifyFactory. Altering this would require tearing down and re-establishing connections, which will have
+	 * a negative performance impact. For better or worse, deadline is now a global setting.
 	 */
+	@Deprecated
 	Objectify deadline(Double value);
 
 	/**
@@ -158,34 +143,38 @@ public interface Objectify
 	Objectify mandatoryTransactions(boolean value);
 
 	/**
-	 * <p>Get the underlying transaction object associated with this Objectify instance.  You typically
-	 * do not need to use this; use transact() instead.</p>
-	 *
-	 * <p>Note that this is *not* the same as {@code DatastoreService.getCurrentTransaction()},
-	 * which uses the Low-Level API's implicit transaction management.  Every transactional {@code Objectify}
-	 * instance is associated with a specific {@code Transaction} object.</p>
-	 *
-	 * @return the low-level transaction associated with this Objectify instance,
-	 *  or null if no transaction is associated with this instance.
+	 * <p>This used to have meaning in the old GAE SDK but no longer does. Right now this is pretty much
+	 * only useful as a null test to see if you are currently in a transaction. This method will probably
+	 * be removed.</p>
 	 */
-	Transaction getTransaction();
+	AsyncTransaction getTransaction();
 
 	/**
-	 * <p>If you are in a transaction, this provides you an objectify instance which is outside of the
-	 * current transaction and works with the session prior to the transaction start.  Inherits any
-	 * settings (consistency, deadline, etc) from the present Objectify instance.</p>
-	 *
-	 * <p>If you are not in a transaction, this simply returns "this".</p>
-	 *
-	 * <p>This allows code to quickly "escape" a transactional context for the purpose of loading
-	 * manipulating data without creating or affecting XG transactions.</p>
-	 *
-	 * <p><b>All command objects are immutable; this method returns a new object instead of modifying the
-	 * current command object.</b></p>
-	 *
-	 * @return an immutable Objectify instance outside of a transaction, with the session as it was before txn start.
+	 * @deprecated This method has very poorly defined behavior and will be removed SOON. Instead you should
+	 * use the {@link #transactionless(Work)} method.
 	 */
+	@Deprecated
 	Objectify transactionless();
+
+	/**
+	 * <p>Executes work outside of a transaction. This is a way to "escape" from a transaction and perform
+	 * datastore operations that would otherwise not be allowed (or perhaps to load data without hitting entity group
+	 * limits). If there is not already a transaction running, the work is executed normally.
+	 * If there is not already a transaction context, a new transaction will be started.</p>
+	 *
+	 * <p>For example, to return an entity fetched outside of a transaction:
+	 * {@code Thing th = ofy().transactionless(() -> ofy().load().key(thingKey).now())}</p>
+	 *
+	 * @param work defines the work to be done outside of a transaction
+	 * @return the result of the work
+	 */
+	<R> R transactionless(Work<R> work);
+
+	/**
+	 * <p>Exactly the same behavior as the Work version, but doesn't return anything. Convenient for Java8
+	 * so you don't have to return something from the lambda.</p>
+	 */
+	void transactionless(Runnable work);
 
 	/**
 	 * <p>Executes work in a transaction.  If there is already a transaction context, that context will be inherited.
@@ -224,6 +213,12 @@ public interface Objectify
 	<R> R transactNew(Work<R> work);
 
 	/**
+	 * <p>Exactly the same behavior as the Work version, but doesn't return anything. Convenient for Java8
+	 * so you don't have to return something from the lambda.</p>
+	 */
+	void transactNew(Runnable work);
+
+	/**
 	 * <p>Executes the work in a new transaction, repeating up to limitTries times when a ConcurrentModificationException
 	 * is thrown.  This requires your Work to be idempotent; otherwise limit tries to 1.
 	 *
@@ -234,6 +229,12 @@ public interface Objectify
 	 * @return the result of the work
 	 */
 	<R> R transactNew(int limitTries, Work<R> work);
+
+	/**
+	 * <p>Exactly the same behavior as the Work version, but doesn't return anything. Convenient for Java8
+	 * so you don't have to return something from the lambda.</p>
+	 */
+	void transactNew(int limitTries, Runnable work);
 
 	/**
 	 * <p>Executes the work with the transactional behavior defined by the parameter txnType.  This is very similar
@@ -252,6 +253,12 @@ public interface Objectify
 	 * @return the result of the work
 	 */
 	<R> R execute(TxnType txnType, Work<R> work);
+
+	/**
+	 * <p>Exactly the same behavior as the Work version, but doesn't return anything. Convenient for Java8
+	 * so you don't have to return something from the lambda.</p>
+	 */
+	void execute(TxnType txnType, Runnable work);
 
 	/**
 	 * Synchronously flushes any deferred operations to the datastore. Objectify does this for you at the end

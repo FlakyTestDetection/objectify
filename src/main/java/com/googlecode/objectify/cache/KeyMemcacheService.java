@@ -1,113 +1,113 @@
 package com.googlecode.objectify.cache;
 
-import com.google.appengine.api.datastore.Key;
-import com.google.appengine.api.datastore.KeyFactory;
-import com.google.appengine.api.memcache.MemcacheService;
-import com.google.appengine.api.memcache.MemcacheService.CasValues;
-import com.google.appengine.api.memcache.MemcacheService.IdentifiableValue;
-import com.google.common.base.Function;
+import com.google.cloud.datastore.Key;
 import com.google.common.collect.Collections2;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
+import com.googlecode.objectify.cache.MemcacheService.CasPut;
+import lombok.RequiredArgsConstructor;
+import net.spy.memcached.CASValue;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
- * Subset of MemcacheService used by EntityMemcache, but smart enough to translate Key into the stringified
- * version so that the memcache keys are intelligible. Also guards against calling through to the underlying
- * service when the operation is a no-op (ie, the collection of keys to operate on is empty).
+ * Like MemcacheService but translates keys and values into forms more palatable to the low level service. Also protects
+ * against no-ops (empty collections). Also stores a sentinel value for null and replaces it with null on fetch.
+ * Memcached doesn't store nulls (the old GAE SDK hid this from us).
  *
  * @author Jeff Schnitzer <jeff@infohazard.org>
  */
+@RequiredArgsConstructor
 public class KeyMemcacheService
 {
-	/** */
-	private static final Function<Key, String> STRINGIFY = new Function<Key, String>() {
-		@Override
-		public String apply(Key input) {
-			return KeyFactory.keyToString(input);
-		}
-	};
+	/** Stored as a value to indicate that this is a null; memcached doesn't store actual nulls */
+	static final String NULL_VALUE = "";
 
 	/** */
-	MemcacheService service;
+	private final MemcacheService service;
 
-	/** */
-	public KeyMemcacheService(MemcacheService service) {
-		this.service = service;
+	private Key fromCacheKey(final String key) {
+		return Key.fromUrlSafe(key);
 	}
 
-	private <T> Map<Key, T> keyify(Map<String, T> stringified) {
-		Map<Key, T> result = Maps.newLinkedHashMap();
-		for (Map.Entry<String, T> entry: stringified.entrySet())
-			result.put(KeyFactory.stringToKey(entry.getKey()), entry.getValue());
-
-		return result;
+	private String toCacheKey(final Key key) {
+		return key.toUrlSafe();
 	}
 
-	private Set<Key> keyify(Set<String> stringified) {
-		Set<Key> result = Sets.newLinkedHashSet();
-		for (String str: stringified)
-			result.add(KeyFactory.stringToKey(str));
-
-		return result;
+	private Collection<String> toCacheKeys(final Collection<Key> keys) {
+		return Collections2.transform(keys, this::toCacheKey);
 	}
 
-	private <T> Map<String, T> stringify(Map<Key, T> keyified) {
-		Map<String, T> result = Maps.newLinkedHashMap();
-		for (Map.Entry<Key, T> entry: keyified.entrySet())
-			result.put(KeyFactory.keyToString(entry.getKey()), entry.getValue());
-
-		return result;
+	private Object toCacheValue(final Object thing) {
+		return thing == null ? NULL_VALUE : thing;
 	}
 
-	private Collection<String> stringify(Collection<Key> keys) {
-		return Collections2.transform(keys, STRINGIFY);
+	private Object fromCacheValue(final Object thing) {
+		return NULL_VALUE.equals(thing) ? null : thing;
 	}
 
-	public Map<Key, IdentifiableValue> getIdentifiables(Collection<Key> keys) {
+	public Map<Key, CASValue<Object>> getIdentifiables(final Collection<Key> keys) {
 		if (keys.isEmpty())
 			return Collections.emptyMap();
 		
-		Map<String, IdentifiableValue> map = service.getIdentifiables(stringify(keys));
-		return keyify(map);
+		final Map<String, CASValue<Object>> map = service.getIdentifiables(toCacheKeys(keys));
+
+		final Map<Key, CASValue<Object>> dataForApp = new LinkedHashMap<>();
+		map.forEach((key, value) -> {
+			final CASValue<Object> transformedValue = (value == null)
+					? null
+					: new CASValue<>(value.getCas(), fromCacheValue(value.getValue()));
+			dataForApp.put(fromCacheKey(key), transformedValue);
+		});
+		return dataForApp;
 	}
 
-	public Map<Key, Object> getAll(Collection<Key> keys) {
+	public Map<Key, Object> getAll(final Collection<Key> keys) {
 		if (keys.isEmpty())
 			return Collections.emptyMap();
 			
-		Map<String, Object> map = service.getAll(stringify(keys));
-		return keyify(map);
+		final Map<String, Object> map = service.getAll(toCacheKeys(keys));
+
+		final Map<Key, Object> dataForApp = new LinkedHashMap<>();
+		map.forEach((key, value) -> dataForApp.put(fromCacheKey(key), fromCacheValue(value)));
+		return dataForApp;
 	}
 
-	public void putAll(Map<Key, Object> map) {
+	public void putAll(final Map<Key, Object> map) {
 		if (map.isEmpty())
 			return;
-		
-		service.putAll(stringify(map));
+
+		final Map<String, Object> dataForCache = new LinkedHashMap<>();
+		map.forEach((key, value) -> dataForCache.put(toCacheKey(key), toCacheValue(value)));
+
+		service.putAll(dataForCache);
 	}
 
-	public Set<Key> putIfUntouched(Map<Key, CasValues> map) {
+	public Set<Key> putIfUntouched(final Map<Key, CasPut> map) {
 		if (map.isEmpty())
 			return Collections.emptySet();
-		
-		Set<String> result = service.putIfUntouched(stringify(map));
-		return keyify(result);
+
+		final Map<String, CasPut> dataForCache = new LinkedHashMap<>();
+		map.forEach((key, value) -> {
+			final CasPut actualPut = new CasPut(value.getIv(), toCacheValue(value.getNextToStore()), value.getExpirationSeconds());
+			dataForCache.put(toCacheKey(key), actualPut);
+		});
+
+		final Set<String> result = service.putIfUntouched(dataForCache);
+		return result.stream()
+				.map(this::fromCacheKey)
+				.collect(Collectors.toCollection(LinkedHashSet::new));
 	}
 
-	public void deleteAll(Collection<Key> keys) {
+	public void deleteAll(final Collection<Key> keys) {
 		if (keys.isEmpty())
 			return;
-		
-		service.deleteAll(stringify(keys));
-	}
 
-	@SuppressWarnings("deprecation")
-	public void setErrorHandler(com.google.appengine.api.memcache.ErrorHandler handler) {
-		service.setErrorHandler(handler);
+		final Collection<String> stringKeys = toCacheKeys(keys);
+		service.deleteAll(stringKeys);
 	}
 }

@@ -3,53 +3,53 @@
 
 package com.googlecode.objectify.test;
 
-import com.google.appengine.api.datastore.Entity;
+import com.google.cloud.datastore.Entity;
+import com.google.cloud.datastore.FullEntity;
+import com.googlecode.objectify.Key;
 import com.googlecode.objectify.test.util.TestBase;
-import org.testng.annotations.Test;
-import java.util.logging.Logger;
-import static com.googlecode.objectify.test.util.TestObjectifyService.ofy;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.nullValue;
+import org.junit.jupiter.api.Test;
+
+import static com.google.common.truth.Truth.assertThat;
+import static com.googlecode.objectify.ObjectifyService.ofy;
 
 /**
  * Tests of using the native datastore Entity type
  *
  * @author Jeff Schnitzer <jeff@infohazard.org>
  */
-public class RawEntityTests extends TestBase
-{
-	/** */
-	@SuppressWarnings("unused")
-	private static Logger log = Logger.getLogger(RawEntityTests.class.getName());
+class RawEntityTests extends TestBase {
 
 	/** */
 	@Test
-	public void saveAndLoadRawEntityWorks() throws Exception {
-		Entity ent = new Entity("asdf");
-		ent.setProperty("foo", "bar");
+	void saveAndLoadRawEntityWorks() throws Exception {
+		final FullEntity<?> ent = makeEntity("asdf")
+				.set("foo", "bar")
+				.build();
 
-		ofy().save().entity(ent).now();
+		final Key<?> key = ofy().save().entity(ent).now();
 		ofy().clear();
 
-		Entity fetched = ofy().load().<Entity>value(ent).now();
+		final Entity fetched1 = (Entity)ofy().load().key(key).now();
+		ofy().clear();
 
-		assertThat(fetched.getProperty("foo"), equalTo(ent.getProperty("foo")));
+		final Entity fetched2 = ofy().load().<Entity>value(fetched1).now();
+
+		assertThat(fetched2).isEqualTo(fetched1);
 	}
 
 	/** */
 	@Test
-	public void deleteRawEntityWorks() throws Exception {
-		Entity ent = new Entity("asdf");
-		ent.setProperty("foo", "bar");
+	void deleteRawEntityWorks() throws Exception {
+		final FullEntity<?> ent = makeEntity("asdf")
+				.set("foo", "bar")
+				.build();
 
-		ofy().save().entity(ent).now();
+		final Entity saved = datastore().put(ent);
 		ofy().clear();
 
-		ofy().delete().entity(ent);
+		ofy().delete().entity(saved);
 
-		Entity fetched = ofy().load().<Entity>value(ent).now();
-
-		assertThat(fetched, nullValue());
+		final Entity fetched = ofy().load().<Entity>value(saved).now();
+		assertThat(fetched).isNull();
 	}
 }

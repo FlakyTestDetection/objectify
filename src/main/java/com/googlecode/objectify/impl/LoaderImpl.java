@@ -1,6 +1,6 @@
 package com.googlecode.objectify.impl;
 
-import com.google.appengine.api.datastore.Entity;
+import com.google.cloud.datastore.Entity;
 import com.google.common.base.Predicates;
 import com.google.common.collect.Maps;
 import com.googlecode.objectify.Key;
@@ -30,18 +30,24 @@ import java.util.Set;
  *
  * @author Jeff Schnitzer <jeff@infohazard.org>
  */
-public class LoaderImpl<L extends Loader> extends Queryable<Object> implements Loader, Cloneable
+class LoaderImpl extends Queryable<Object> implements Loader
 {
-	/** */
-	protected ObjectifyImpl<?> ofy;
+	/** Used by some child command objects */
+	final ObjectifyImpl ofy;
 
 	/** */
-	protected LoadArrangement loadArrangement = new LoadArrangement();
+	private final LoadArrangement loadArrangement;
 
 	/** */
-	public LoaderImpl(ObjectifyImpl<?> ofy) {
+	LoaderImpl(final ObjectifyImpl ofy) {
+		this(ofy, new LoadArrangement());
+	}
+
+	/** */
+	private LoaderImpl(final ObjectifyImpl ofy, final LoadArrangement loadArrangement) {
 		super(null);
 		this.ofy = ofy;
+		this.loadArrangement = loadArrangement;
 	}
 
 	/* (non-Javadoc)
@@ -56,27 +62,24 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 * @see com.googlecode.objectify.cmd.Loader#group(java.lang.Class<?>[])
 	 */
 	@Override
-	@SuppressWarnings("unchecked")
-	public L group(Class<?>... groups) {
-		LoaderImpl<L> clone = this.clone();
+	public Loader group(final Class<?>... groups) {
+		final LoadArrangement arrangement = new LoadArrangement();
+		arrangement.addAll(Arrays.asList(groups));
+		arrangement.addAll(this.loadArrangement);
 
-		clone.loadArrangement = new LoadArrangement();
-		clone.loadArrangement.addAll(Arrays.asList(groups));
-		clone.loadArrangement.addAll(this.loadArrangement);
-
-		return (L)clone;
+		return new LoaderImpl(ofy, arrangement);
 	}
 
 	/* (non-Javadoc)
 	 * @see com.googlecode.objectify.cmd.Loader#type(java.lang.Class)
 	 */
 	@Override
-	public <E> LoadType<E> type(Class<E> type) {
+	public <E> LoadType<E> type(final Class<E> type) {
 		return new LoadTypeImpl<>(this, Key.getKind(type), type);
 	}
 
 	@Override
-	public <E> LoadType<E> kind(String kind) {
+	public <E> LoadType<E> kind(final String kind) {
 		return new LoadTypeImpl<>(this, kind, null);
 	}
 
@@ -84,7 +87,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 * @see com.googlecode.objectify.cmd.Loader#ref(com.googlecode.objectify.Ref)
 	 */
 	@Override
-	public <E> LoadResult<E> ref(Ref<E> ref) {
+	public <E> LoadResult<E> ref(final Ref<E> ref) {
 		return key(ref.key());
 	}
 
@@ -93,7 +96,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 */
 	@Override
 	@SuppressWarnings("unchecked")
-	public <E> Map<Key<E>, E> refs(Ref<? extends E>... refs) {
+	public <E> Map<Key<E>, E> refs(final Ref<? extends E>... refs) {
 		return refs(Arrays.asList((Ref<E>[])refs));
 	}
 
@@ -109,7 +112,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 * @see com.googlecode.objectify.cmd.Loader#entity(com.googlecode.objectify.Key)
 	 */
 	@Override
-	public <E> LoadResult<E> key(Key<E> key) {
+	public <E> LoadResult<E> key(final Key<E> key) {
 		return new LoadResult<>(key, createLoadEngine().load(key));
 	}
 
@@ -117,7 +120,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 * @see com.googlecode.objectify.cmd.Loader#entity(java.lang.Object)
 	 */
 	@Override
-	public <E> LoadResult<E> entity(E entity) {
+	public <E> LoadResult<E> entity(final E entity) {
 		return key(ofy.factory().keys().keyOf(entity));
 	}
 
@@ -126,7 +129,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 */
 	@Override
 	@SuppressWarnings("unchecked")
-	public <E> LoadResult<E> value(Object key) {
+	public <E> LoadResult<E> value(final Object key) {
 		return (LoadResult<E>)key(ofy.factory().keys().anythingToKey(key));
 	}
 
@@ -135,7 +138,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 */
 	@Override
 	@SuppressWarnings("unchecked")
-	public <E> Map<Key<E>, E> keys(Key<? extends E>... keys) {
+	public <E> Map<Key<E>, E> keys(final Key<? extends E>... keys) {
 		return this.keys(Arrays.asList((Key<E>[])keys));
 	}
 
@@ -143,7 +146,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 * @see com.googlecode.objectify.cmd.Loader#keys(java.lang.Iterable)
 	 */
 	@Override
-	public <E> Map<Key<E>, E> keys(Iterable<Key<E>> keys) {
+	public <E> Map<Key<E>, E> keys(final Iterable<Key<E>> keys) {
 		return values(keys);
 	}
 
@@ -151,7 +154,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 * @see com.googlecode.objectify.cmd.Loader#entities(E[])
 	 */
 	@Override
-	public <E> Map<Key<E>, E> entities(E... entities) {
+	public <E> Map<Key<E>, E> entities(final E... entities) {
 		return this.entities(Arrays.asList(entities));
 	}
 
@@ -159,7 +162,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 * @see com.googlecode.objectify.cmd.Loader#entities(java.lang.Iterable)
 	 */
 	@Override
-	public <E> Map<Key<E>, E> entities(Iterable<E> values) {
+	public <E> Map<Key<E>, E> entities(final Iterable<E> values) {
 		return values(values);
 	}
 
@@ -167,7 +170,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 * @see com.googlecode.objectify.cmd.Loader#values(java.lang.Object[])
 	 */
 	@Override
-	public <E> Map<Key<E>, E> values(Object... values) {
+	public <E> Map<Key<E>, E> values(final Object... values) {
 		return values(Arrays.asList(values));
 	}
 
@@ -176,17 +179,17 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 */
 	@Override
 	@SuppressWarnings("unchecked")
-	public <E> Map<Key<E>, E> values(Iterable<?> values) {
+	public <E> Map<Key<E>, E> values(final Iterable<?> values) {
 
 		// Do this in a separate pass so any errors converting keys will show up before we try loading something
-		List<Key<E>> keys = new ArrayList<>();
-		for (Object keyish: values)
-			keys.add((Key<E>)ofy.factory().keys().anythingToKey(keyish));
+		final List<Key<E>> keys = new ArrayList<>();
+		for (final Object keyish: values)
+			keys.add(ofy.factory().keys().anythingToKey(keyish));
 
-		LoadEngine engine = createLoadEngine();
+		final LoadEngine engine = createLoadEngine();
 
 		final Map<Key<E>, Result<E>> results = new LinkedHashMap<>();
-		for (Key<E> key: keys)
+		for (final Key<E> key: keys)
 			results.put(key, engine.load(key));
 
 		engine.execute();
@@ -200,7 +203,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 				return
 					Maps.newLinkedHashMap(
 						Maps.filterValues(
-							Maps.transformValues(results, ResultNowFunction.<E>instance()),
+							Maps.transformValues(results, ResultNowFunction.instance()),
 							Predicates.notNull()));
 			}
 		});
@@ -223,7 +226,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	}
 
 	/** */
-	public ObjectifyImpl<?> getObjectifyImpl() {
+	public ObjectifyImpl getObjectifyImpl() {
 		return this.ofy;
 	}
 
@@ -232,7 +235,7 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 * @return a fresh engine that handles fundamental datastore operations for load commands
 	 */
 	LoadEngine createLoadEngine() {
-		return new LoadEngine(ofy, ofy.getSession(), ofy.createAsyncDatastoreService(), loadArrangement);
+		return new LoadEngine(ofy, ofy.getSession(), ofy.asyncDatastore(), loadArrangement);
 	}
 
 	/**
@@ -240,39 +243,26 @@ public class LoaderImpl<L extends Loader> extends Queryable<Object> implements L
 	 * @return a fresh engine that handles fundamental datastore operations for queries
 	 */
 	QueryEngine createQueryEngine() {
-		return new QueryEngine(this, ofy.createAsyncDatastoreService(), ofy.getTransaction() == null ? null : ofy.getTransaction().getRaw());
+		return new QueryEngine(this, ofy.asyncDatastore());
 	}
 
 	/* (non-Javadoc)
 	 * @see com.googlecode.objectify.cmd.Loader#now(com.googlecode.objectify.Key)
 	 */
 	@Override
-	public <E> E now(Key<E> key) {
+	public <E> E now(final Key<E> key) {
 		return createLoadEngine().load(key).now();
 	}
 
 	/* (non-Javadoc)
-	 * @see com.googlecode.objectify.Objectify#toPojo(com.google.appengine.api.datastore.Entity)
+	 * @see com.googlecode.objectify.Objectify#toPojo(com.google.cloud.datastore.Entity)
 	 */
 	@Override
-	public <T> T fromEntity(Entity entity) {
-		LoadEngine engine = createLoadEngine();
-		LoadContext context = new LoadContext(engine);
-		T result = engine.load(entity, context);
+	public <T> T fromEntity(final Entity entity) {
+		final LoadEngine engine = createLoadEngine();
+		final LoadContext context = new LoadContext(engine);
+		final T result = engine.load(entity, context);
  		context.done();
 	 	return result;
 	}
-
-	/* (non-Javadoc)
-	 * @see java.lang.Object#clone()
-	 */
-	@SuppressWarnings("unchecked")
-	protected LoaderImpl<L> clone() {
-		try {
-			return (LoaderImpl<L>)super.clone();
-		} catch (CloneNotSupportedException e) {
-			throw new RuntimeException(e); // impossible
-		}
-	}
-
 }

@@ -1,15 +1,16 @@
 package com.googlecode.objectify.impl;
 
-import com.google.appengine.api.datastore.AsyncDatastoreService;
-import com.google.appengine.api.datastore.DatastoreServiceConfig;
-import com.google.appengine.api.datastore.ReadPolicy;
-import com.google.appengine.api.datastore.ReadPolicy.Consistency;
+import com.google.cloud.datastore.KeyValue;
+import com.google.cloud.datastore.ListValue;
+import com.google.cloud.datastore.NullValue;
+import com.google.cloud.datastore.Value;
 import com.googlecode.objectify.Key;
 import com.googlecode.objectify.Objectify;
 import com.googlecode.objectify.ObjectifyFactory;
 import com.googlecode.objectify.TxnType;
 import com.googlecode.objectify.Work;
 import com.googlecode.objectify.annotation.Entity;
+import com.googlecode.objectify.cache.PendingFutures;
 import com.googlecode.objectify.cmd.Deferred;
 import com.googlecode.objectify.cmd.Deleter;
 import com.googlecode.objectify.cmd.Loader;
@@ -18,6 +19,9 @@ import com.googlecode.objectify.impl.translate.CreateContext;
 import com.googlecode.objectify.impl.translate.SaveContext;
 import com.googlecode.objectify.impl.translate.Translator;
 import com.googlecode.objectify.impl.translate.TypeKey;
+import com.googlecode.objectify.util.Closeable;
+import com.googlecode.objectify.util.Values;
+import lombok.Getter;
 
 import java.lang.reflect.Array;
 import java.util.ArrayList;
@@ -32,39 +36,35 @@ import java.util.List;
  *
  * @author Jeff Schnitzer <jeff@infohazard.org>
  */
-public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
+public class ObjectifyImpl implements Objectify, Closeable
 {
 	/** The factory that produced us */
-	protected ObjectifyFactory factory;
-
-	/** Our options */
-	protected boolean cache = true;
-	protected Consistency consistency = Consistency.STRONG;
-	protected Double deadline;
-	protected boolean mandatoryTransactions = false;
+	protected final ObjectifyFactory factory;
 
 	/** */
-	protected Transactor<O> transactor = new TransactorNo<>(this);
+	@Getter
+	protected final ObjectifyOptions options;
+
+	/** */
+	protected final Transactor transactor;
 
 	/**
 	 */
-	public ObjectifyImpl(ObjectifyFactory fact) {
+	public ObjectifyImpl(final ObjectifyFactory fact) {
 		this.factory = fact;
+		this.options = new ObjectifyOptions();
+		this.transactor = new TransactorNo(this);
 	}
 
-	/** Copy constructor */
-	public ObjectifyImpl(ObjectifyImpl<O> other) {
-		this.factory = other.factory;
-		this.cache = other.cache;
-		this.consistency = other.consistency;
-		this.deadline = other.deadline;
-		this.transactor = other.transactor;
-		this.mandatoryTransactions = other.mandatoryTransactions;
+	public ObjectifyImpl(final ObjectifyFactory factory, final ObjectifyOptions options, final TransactorSupplier supplier) {
+		this.factory = factory;
+		this.options = options;
+		this.transactor = supplier.get(this);
 	}
 
 	/* (non-Javadoc)
-	 * @see com.googlecode.objectify.Objectify#getFactory()
-	 */
+		 * @see com.googlecode.objectify.Objectify#getFactory()
+		 */
 	public ObjectifyFactory factory() {
 		return this.factory;
 	}
@@ -74,7 +74,7 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 	 */
 	@Override
 	public Loader load() {
-		return new LoaderImpl<>(this);
+		return new LoaderImpl(this);
 	}
 
 	/* (non-Javadoc)
@@ -102,77 +102,59 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 	}
 
 	/* (non-Javadoc)
-	 * @see com.googlecode.objectify.Objectify#consistency(com.google.appengine.api.datastore.ReadPolicy.Consistency)
-	 */
-	@Override
-	@SuppressWarnings("unchecked")
-	public O consistency(Consistency value) {
-		if (value == null)
-			throw new IllegalArgumentException("Consistency cannot be null");
-
-		ObjectifyImpl<O> clone = this.clone();
-		clone.consistency = value;
-		return (O)clone;
-	}
-
-	/* (non-Javadoc)
 	 * @see com.googlecode.objectify.Objectify#deadline(java.lang.Double)
 	 */
 	@Override
-	@SuppressWarnings("unchecked")
-	public O deadline(Double value) {
-		ObjectifyImpl<O> clone = this.clone();
-		clone.deadline = value;
-		return (O)clone;
+	public Objectify deadline(final Double value) {
+		// A no-op
+		return this;
 	}
 
 	/* (non-Javadoc)
 	 * @see com.googlecode.objectify.Objectify#cache(boolean)
 	 */
 	@Override
-	@SuppressWarnings("unchecked")
-	public O cache(boolean value) {
-		ObjectifyImpl<O> clone = this.clone();
-		clone.cache = value;
-		return (O)clone;
+	public Objectify cache(boolean value) {
+		return makeNew(options.cache(value));
 	}
 
 	/* (non-Javadoc)
 	 * @see com.googlecode.objectify.Objectify#mandatoryTransactions(boolean)
 	 */
 	@Override
-	@SuppressWarnings("unchecked")
-	public O mandatoryTransactions(boolean value) {
-		ObjectifyImpl<O> clone = this.clone();
-		clone.mandatoryTransactions = value;
-		return (O)clone;
+	public Objectify mandatoryTransactions(boolean value) {
+		return makeNew(options.mandatoryTransactions(value));
+	}
+
+	/** Same transactor, different options */
+	private ObjectifyImpl makeNew(final ObjectifyOptions opts) {
+		return makeNew(opts, ofy -> transactor);
+	}
+
+	/** Same options, different transactor */
+	ObjectifyImpl makeNew(final TransactorSupplier supplier) {
+		return makeNew(options, supplier);
+	}
+
+	/** Can be overriden if you want to subclass the ObjectifyImpl */
+	protected ObjectifyImpl makeNew(final ObjectifyOptions opts, final TransactorSupplier supplier) {
+		return new ObjectifyImpl(factory, opts, supplier);
 	}
 
 	/* (non-Javadoc)
 	 * @see com.googlecode.objectify.Objectify#transactionless()
 	 */
+	@Deprecated
 	@Override
-	@SuppressWarnings("unchecked")
-	public O transactionless() {
-		return (O)transactor.transactionless(this);
+	public Objectify transactionless() {
+		return transactor.transactionless(this);
 	}
 
-	/* (non-Javadoc)
-	 * @see java.lang.Object#clone()
-	 */
-	@SuppressWarnings("unchecked")
-	protected ObjectifyImpl<O> clone() {
-		try {
-			return (ObjectifyImpl<O>)super.clone();
-		} catch (CloneNotSupportedException e) {
-			throw new RuntimeException(e); // impossible
-		}
-	}
 
 	/* (non-Javadoc)
 	 * @see com.googlecode.objectify.Objectify#getTxn()
 	 */
-	public TransactionImpl getTransaction() {
+	public AsyncTransaction getTransaction() {
 		return transactor.getTransaction();
 	}
 
@@ -180,8 +162,29 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 	 * @see com.googlecode.objectify.Objectify#execute(com.googlecode.objectify.TxnType, com.googlecode.objectify.Work)
 	 */
 	@Override
-	public <R> R execute(TxnType txnType, Work<R> work) {
+	public <R> R execute(final TxnType txnType, final Work<R> work) {
 		return transactor.execute(this, txnType, work);
+	}
+
+	@Override
+	public void execute(final TxnType txnType, final Runnable work) {
+		execute(txnType, (Work<Void>)() -> {
+			work.run();
+			return null;
+		});
+	}
+
+	@Override
+	public <R> R transactionless(final Work<R> work) {
+		return transactor.transactionless(this, work);
+	}
+
+	@Override
+	public void transactionless(final Runnable work) {
+		transactionless((Work<Void>)() -> {
+			work.run();
+			return null;
+		});
 	}
 
 	/* (non-Javadoc)
@@ -194,12 +197,9 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 
 	@Override
 	public void transact(final Runnable work) {
-		transact(new Work<Void>() {
-			@Override
-			public Void run() {
-				work.run();
-				return null;
-			}
+		transact((Work<Void>)() -> {
+			work.run();
+			return null;
 		});
 	}
 
@@ -211,12 +211,28 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 		return this.transactNew(Integer.MAX_VALUE, work);
 	}
 
+	@Override
+	public void transactNew(final Runnable work) {
+		transactNew((Work<Void>)() -> {
+			work.run();
+			return null;
+		});
+	}
+
 	/* (non-Javadoc)
 	 * @see com.googlecode.objectify.Objectify#transactNew(com.googlecode.objectify.Work)
 	 */
 	@Override
 	public <R> R transactNew(int limitTries, Work<R> work) {
 		return transactor.transactNew(this, limitTries, work);
+	}
+
+	@Override
+	public void transactNew(int limitTries, final Runnable work) {
+		transactNew(limitTries, (Work<Void>)() -> {
+			work.run();
+			return null;
+		});
 	}
 
 	/* (non-Javadoc)
@@ -228,22 +244,9 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 	}
 
 	/**
-	 * Make a datastore service config that corresponds to our options.
 	 */
-	protected DatastoreServiceConfig createDatastoreServiceConfig() {
-		DatastoreServiceConfig cfg = DatastoreServiceConfig.Builder.withReadPolicy(new ReadPolicy(consistency));
-
-		if (deadline != null)
-			cfg.deadline(deadline);
-
-		return cfg;
-	}
-
-	/**
-	 * Make a datastore service config that corresponds to our options.
-	 */
-	protected AsyncDatastoreService createAsyncDatastoreService() {
-		return factory.createAsyncDatastoreService(this.createDatastoreServiceConfig(), cache);
+	protected AsyncDatastoreReaderWriter asyncDatastore() {
+		return transactor.asyncDatastore();
 	}
 
 	/**
@@ -251,10 +254,10 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 	 * @return a fresh engine that handles fundamental datastore operations for saving and deleting
 	 */
 	protected WriteEngine createWriteEngine() {
-		if (mandatoryTransactions && getTransaction() == null)
+		if (options.isMandatoryTransactions() && getTransaction() == null)
 			throw new IllegalStateException("You have attempted save/delete outside of a transaction, but you have enabled ofy().mandatoryTransactions(true). Perhaps you wanted to start a transaction first?");
 
-		return new WriteEngine(this, createAsyncDatastoreService(), transactor.getSession(), transactor.getDeferrer());
+		return new WriteEngine(this, asyncDatastore(), transactor.getSession(), transactor.getDeferrer());
 	}
 
 	/**
@@ -268,9 +271,9 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 	 *
 	 * @return whatever can be put into a filter clause.
 	 */
-	protected Object makeFilterable(Object value) {
+	protected Value<?> makeFilterable(Object value) {
 		if (value == null)
-			return null;
+			return NullValue.of();
 
 		// This is really quite a dilemma.  We need to convert that value into something we can filter by, but we don't
 		// really have a lot of information about it.  We could use type information from the matched field, but there's
@@ -286,8 +289,8 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 		// If this is an array, make life easier by turning it into a list first.  Because of primitive
 		// mismatching we can't trust Arrays.asList().
 		if (value.getClass().isArray()) {
-			int len = Array.getLength(value);
-			List<Object> asList = new ArrayList<>(len);
+			final int len = Array.getLength(value);
+			final List<Object> asList = new ArrayList<>(len);
 			for (int i=0; i<len; i++)
 				asList.add(Array.get(value, i));
 
@@ -295,19 +298,21 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 		}
 
 		if (value instanceof Iterable) {
-			List<Object> result = new ArrayList<>(50);	// hard limit is 30, but wth
-			for (Object obj: (Iterable<?>)value)
+			final List<Value<?>> result = new ArrayList<>(50);	// hard limit is 30, but wth
+			for (final Object obj: (Iterable<?>)value)
 				result.add(makeFilterable(obj));
 
-			return result;
+			return ListValue.of(result);
 		} else {
 			// Special case entity pojos that become keys
 			if (value.getClass().isAnnotationPresent(Entity.class)) {
-				return factory().keys().getMetadataSafe(value).getRawKey(value);
+				return KeyValue.of(factory().keys().rawKeyOf(value));
 			} else {
 				// Run it through a translator
-				Translator<Object, Object> translator = factory().getTranslators().get(new TypeKey<>(value.getClass()), new CreateContext(factory()), Path.root());
-				return translator.save(value, false, new SaveContext(), Path.root());
+				final Translator<Object, Value<?>> translator = factory().getTranslators().get(new TypeKey<>(value.getClass()), new CreateContext(factory()), Path.root());
+
+				// For some reason we have to force all values used as filters to be indexed
+				return Values.index(translator.save(value, false, new SaveContext(), Path.root()), true);
 			}
 		}
 	}
@@ -317,16 +322,11 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 		return this.transactor.getSession();
 	}
 
-	/** @return true if cache is enabled */
-	public boolean getCache() {
-		return cache;
-	}
-
 	/* (non-Javadoc)
 	 * @see com.googlecode.objectify.Objectify#isLoaded(com.googlecode.objectify.Key)
 	 */
 	@Override
-	public boolean isLoaded(Key<?> key) {
+	public boolean isLoaded(final Key<?> key) {
 		return transactor.getSession().contains(key);
 	}
 
@@ -338,15 +338,27 @@ public class ObjectifyImpl<O extends Objectify> implements Objectify, Cloneable
 	/**
 	 * Defer the saving of one entity. Updates the session cache with this new value.
 	 */
-	void deferSave(Object entity) {
+	void deferSave(final Object entity) {
 		transactor.getDeferrer().deferSave(entity);
 	}
 
 	/**
 	 * Defer the deletion of one entity. Updates the session cache with this new value.
 	 */
-	void deferDelete(Key<?> key) {
+	void deferDelete(final Key<?> key) {
 		transactor.getDeferrer().deferDelete(key);
 	}
 
+	/**
+	 * Ends this transactional scope.
+	 */
+	@Override
+	public void close() {
+		// The order of these three operations is significant
+		flush();
+
+		PendingFutures.completeAllPendingFutures();
+
+		factory().close(this);
+	}
 }

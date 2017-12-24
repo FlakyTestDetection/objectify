@@ -3,10 +3,18 @@
 
 package com.googlecode.objectify.test.util;
 
-import com.googlecode.objectify.util.Closeable;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import java.util.logging.Logger;
+import com.google.cloud.datastore.Datastore;
+import com.google.cloud.datastore.EntityValue;
+import com.google.cloud.datastore.FullEntity;
+import com.google.cloud.datastore.IncompleteKey;
+import com.google.cloud.datastore.Value;
+import com.googlecode.objectify.Key;
+import com.googlecode.objectify.impl.AsyncDatastore;
+import net.spy.memcached.MemcachedClient;
+import org.junit.jupiter.api.extension.ExtendWith;
+
+import static com.googlecode.objectify.ObjectifyService.factory;
+import static com.googlecode.objectify.ObjectifyService.ofy;
 
 /**
  * All tests should extend this class to set up the GAE environment.
@@ -14,34 +22,47 @@ import java.util.logging.Logger;
  *
  * @author Jeff Schnitzer <jeff@infohazard.org>
  */
-public class TestBase extends GAETestBase
-{
+@ExtendWith({
+		MockitoExtension.class,
+		LocalDatastoreExtension.class,
+		LocalMemcacheExtension.class,
+		ObjectifyExtension.class,
+})
+public class TestBase {
 	/** */
-	@SuppressWarnings("unused")
-	private static Logger log = Logger.getLogger(TestBase.class.getName());
-
-	/** Tear down every method */
-	private Closeable rootService;
-
-	/** */
-	@BeforeMethod
-	public void setUp() {
-		this.setUpObjectifyFactory(new TestObjectifyFactory());
+	protected Value<FullEntity<?>> makeEmbeddedEntityWithProperty(final String name, final Value<?> value) {
+		return EntityValue.of(FullEntity.newBuilder().set(name, value).build());
 	}
 
 	/** */
-	@AfterMethod
-	public void tearDown() {
-		// This is normally done in ObjectifyFilter but that doesn't exist for tests
-		rootService.close();
-		rootService = null;
+	protected Datastore datastore() {
+		return factory().datastore();
 	}
 
-	protected void setUpObjectifyFactory(TestObjectifyFactory factory) {
-		if (rootService != null)
-			rootService.close();
+	/** */
+	protected MemcachedClient memcache() {
+		return factory().memcache();
+	}
 
-		TestObjectifyService.setFactory(factory);
-		rootService = TestObjectifyService.begin();
+	protected AsyncDatastore asyncDatastore() {
+		return factory().asyncDatastore();
+	}
+
+	/** */
+	protected <E> E saveClearLoad(final E thing) {
+		final Key<E> key = ofy().save().entity(thing).now();
+		ofy().clear();
+		return ofy().load().key(key).now();
+	}
+
+	/** */
+	protected FullEntity.Builder<?> makeEntity(final Class<?> kind) {
+		return makeEntity(Key.getKind(kind));
+	}
+
+	/** */
+	protected FullEntity.Builder<?> makeEntity(final String kind) {
+		final IncompleteKey incompleteKey = factory().datastore().newKeyFactory().setKind(kind).newKey();
+		return FullEntity.newBuilder(incompleteKey);
 	}
 }

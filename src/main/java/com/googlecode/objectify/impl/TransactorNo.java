@@ -1,46 +1,36 @@
 package com.googlecode.objectify.impl;
 
+import com.google.cloud.datastore.DatastoreException;
 import com.google.common.base.Preconditions;
-import com.googlecode.objectify.Objectify;
-import com.googlecode.objectify.ObjectifyService;
 import com.googlecode.objectify.TxnType;
 import com.googlecode.objectify.Work;
-import java.util.ConcurrentModificationException;
-import java.util.logging.Level;
-import java.util.logging.Logger;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Transactor which represents the absence of a transaction.
  *
  * @author Jeff Schnitzer <jeff@infohazard.org>
  */
-/**
- * @author jeff
- *
- * @param <O>
- */
-public class TransactorNo<O extends Objectify> extends Transactor<O>
+@Slf4j
+class TransactorNo extends Transactor
 {
-	/** */
-	private static final Logger log = Logger.getLogger(TransactorNo.class.getName());
-
 	/**
 	 */
-	public TransactorNo(Objectify ofy) {
+	TransactorNo(final ObjectifyImpl ofy) {
 		super(ofy);
 	}
 
 	/**
 	 */
-	public TransactorNo(Objectify ofy, Session session) {
+	TransactorNo(final ObjectifyImpl ofy, final Session session) {
 		super(ofy, session);
 	}
 
 	/* (non-Javadoc)
-	 * @see com.googlecode.objectify.Objectify#getTxn()
+	 * @see com.googlecode.objectify.Objectify#getTransaction()
 	 */
 	@Override
-	public TransactionImpl getTransaction() {
+	public AsyncTransactionImpl getTransaction() {
 		// This version doesn't have a transaction, always null.
 		return null;
 	}
@@ -49,7 +39,7 @@ public class TransactorNo<O extends Objectify> extends Transactor<O>
 	 * @see com.googlecode.objectify.impl.cmd.Transactor#transactionless()
 	 */
 	@Override
-	public ObjectifyImpl<O> transactionless(ObjectifyImpl<O> parent) {
+	public ObjectifyImpl transactionless(ObjectifyImpl parent) {
 		return parent;
 	}
 
@@ -57,7 +47,7 @@ public class TransactorNo<O extends Objectify> extends Transactor<O>
 	 * @see com.googlecode.objectify.impl.cmd.Transactor#execute(com.googlecode.objectify.TxnType, com.googlecode.objectify.Work)
 	 */
 	@Override
-	public <R> R execute(ObjectifyImpl<O> parent, TxnType txnType, Work<R> work) {
+	public <R> R execute(final ObjectifyImpl parent, final TxnType txnType, final Work<R> work) {
 		switch (txnType) {
 			case MANDATORY:
 				throw new IllegalStateException("MANDATORY transaction but no transaction present");
@@ -77,11 +67,16 @@ public class TransactorNo<O extends Objectify> extends Transactor<O>
 
 	}
 
+	@Override
+	public <R> R transactionless(final ObjectifyImpl parent, final Work<R> work) {
+		return work.run();
+	}
+
 	/* (non-Javadoc)
 	 * @see com.googlecode.objectify.impl.Transactor#transact(com.googlecode.objectify.impl.ObjectifyImpl, com.googlecode.objectify.Work)
 	 */
 	@Override
-	public <R> R transact(ObjectifyImpl<O> parent, Work<R> work) {
+	public <R> R transact(final ObjectifyImpl parent, final Work<R> work) {
 		return this.transactNew(parent, Integer.MAX_VALUE, work);
 	}
 
@@ -89,19 +84,20 @@ public class TransactorNo<O extends Objectify> extends Transactor<O>
 	 * @see com.googlecode.objectify.impl.Transactor#transactNew(com.googlecode.objectify.impl.ObjectifyImpl, int, com.googlecode.objectify.Work)
 	 */
 	@Override
-	public <R> R transactNew(ObjectifyImpl<O> parent, int limitTries, Work<R> work) {
+	public <R> R transactNew(final ObjectifyImpl parent, int limitTries, final Work<R> work) {
 		Preconditions.checkArgument(limitTries >= 1);
 
 		while (true) {
 			try {
 				return transactOnce(parent, work);
-			} catch (ConcurrentModificationException ex) {
-				if (--limitTries > 0) {
-					if (log.isLoggable(Level.WARNING))
-						log.warning("Optimistic concurrency failure for " + work + " (retrying): " + ex);
+			} catch (DatastoreException ex) {
+				// This is a terrible way to distinguish contention, but it's all the SDK offers for now
+				if (!ex.getMessage().startsWith("too much contention on these datastore entities"))
+					throw ex;
 
-					if (log.isLoggable(Level.FINEST))
-						log.log(Level.FINEST, "Details of optimistic concurrency failure", ex);
+				if (--limitTries > 0) {
+					log.warn("Optimistic concurrency failure for {} (retrying): {}", work, ex);
+					log.trace("Details of optimistic concurrency failure", ex);
 				} else {
 					throw ex;
 				}
@@ -109,45 +105,39 @@ public class TransactorNo<O extends Objectify> extends Transactor<O>
 		}
 	}
 
+	@Override
+	public AsyncDatastoreReaderWriter asyncDatastore() {
+		return factory.asyncDatastore(ofy.getOptions().isCache());
+	}
+
 	/**
 	 * One attempt at executing a transaction
 	 */
-	private <R> R transactOnce(ObjectifyImpl<O> parent, Work<R> work) {
-		ObjectifyImpl<O> txnOfy = startTransaction(parent);
-		ObjectifyService.push(txnOfy);
+	private <R> R transactOnce(final ObjectifyImpl parent, final Work<R> work) {
+		final ObjectifyImpl txnOfy = factory.open(parent.getOptions(), next -> new TransactorYes(next, this));
 
 		boolean committedSuccessfully = false;
 		try {
-			R result = work.run();
+			final R result = work.run();
 			txnOfy.flush();
 			txnOfy.getTransaction().commit();
 			committedSuccessfully = true;
 			return result;
 		}
-		finally
-		{
+		finally {
 			if (txnOfy.getTransaction().isActive()) {
 				try {
 					txnOfy.getTransaction().rollback();
 				} catch (RuntimeException ex) {
-					log.log(Level.SEVERE, "Rollback failed, suppressing error", ex);
+					log.error("Rollback failed, suppressing error", ex);
 				}
 			}
 
-			ObjectifyService.pop();
+			txnOfy.close();
 
 			if (committedSuccessfully) {
-				txnOfy.getTransaction().runCommitListeners();
+				((PrivateAsyncTransaction)txnOfy.getTransaction()).runCommitListeners();
 			}
 		}
-	}
-
-	/**
-	 * Create a new transactional session by cloning this instance and resetting the transactor component.
-	 */
-	ObjectifyImpl<O> startTransaction(ObjectifyImpl<O> parent) {
-		ObjectifyImpl<O> cloned = parent.clone();
-		cloned.transactor = new TransactorYes<>(cloned, this);
-		return cloned;
 	}
 }

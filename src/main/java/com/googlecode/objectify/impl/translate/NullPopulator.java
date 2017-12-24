@@ -1,6 +1,6 @@
 package com.googlecode.objectify.impl.translate;
 
-import com.google.appengine.api.datastore.PropertyContainer;
+import com.google.cloud.datastore.FullEntity;
 import com.googlecode.objectify.impl.Path;
 
 
@@ -14,10 +14,10 @@ public class NullPopulator implements Populator<Object>
 	public static NullPopulator INSTANCE = new NullPopulator();
 
 	@Override
-	public void load(PropertyContainer node, LoadContext ctx, Path path, Object into) {
+	public void load(FullEntity<?> node, LoadContext ctx, Path path, Object into) {
 	}
 
 	@Override
-	public void save(Object pojo, boolean index, SaveContext ctx, Path path, PropertyContainer into) {
+	public void save(Object pojo, boolean index, SaveContext ctx, Path path, FullEntity.Builder<?> into) {
 	}
 }
